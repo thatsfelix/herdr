@@ -19,19 +19,16 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
-    /// "Workspace · Tab · window title · Pane", falling back to ids for unnamed parts.
+    /// "Workspace · Tab · Pane", falling back to ids for unnamed parts.
     fn notification_location(
         &self,
         ws_idx: usize,
         tab_idx: usize,
         pane_id: crate::layout::PaneId,
         workspace_label: &str,
+        public_tab_id: &str,
         public_pane_id: &str,
     ) -> String {
-        let terminal = self.app.state.workspaces.get(ws_idx).and_then(|workspace| {
-            let pane = workspace.pane_state(pane_id)?;
-            self.app.state.terminals.get(&pane.attached_terminal_id)
-        });
         let workspace = self.app.state.workspaces.get(ws_idx);
         let workspace_name = if workspace_label.trim().is_empty() {
             workspace.map(|ws| ws.id.clone()).unwrap_or_default()
@@ -39,23 +36,17 @@ impl HeadlessServer {
             workspace_label.to_owned()
         };
         let tab_name = workspace
-            .and_then(|ws| ws.tab_display_name(tab_idx))
-            .unwrap_or_else(|| (tab_idx + 1).to_string());
-        let window_title = terminal.and_then(|terminal| terminal.terminal_title_stripped());
-        let pane_name = terminal
+            .and_then(|ws| ws.tabs.get(tab_idx))
+            .and_then(|tab| tab.custom_name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| public_tab_id.to_owned());
+        let pane_name = workspace
+            .and_then(|ws| ws.pane_state(pane_id))
+            .and_then(|pane| self.app.state.terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.manual_label.clone())
             .filter(|label| !label.trim().is_empty())
             .unwrap_or_else(|| public_pane_id.to_owned());
-        [
-            Some(workspace_name),
-            Some(tab_name),
-            window_title,
-            Some(pane_name),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
+        format!("{workspace_name} · {tab_name} · {pane_name}")
     }
 
     /// The agent's latest reply, read from its own session transcript.
@@ -150,6 +141,7 @@ impl HeadlessServer {
                 tab_idx,
                 pane_id,
                 &workspace_label,
+                &tab_id,
                 &public_pane_id,
             );
             // System banners show the agent's own words under a location subtitle:

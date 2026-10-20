@@ -238,13 +238,13 @@ impl ClientShellState {
                             }
                         })
                     });
-                    // A remote notification starts with its machine so it is never
-                    // mistaken for a local one.
+                    // With more than one machine, the machine leads the location so a
+                    // remote notification is never mistaken for a local one.
                     let body = pending.event.body.map(|body| {
-                        if pending.endpoint_id == ClientEndpointId::Local {
-                            body
-                        } else {
+                        if self.endpoints.len() > 1 {
                             format!("{} · {body}", self.endpoint_label(&pending.endpoint_id))
+                        } else {
+                            body
                         }
                     });
                     effects.push(ClientShellNotificationEffect::System {
