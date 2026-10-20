@@ -19,6 +19,60 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
+    /// "Workspace · Tab · window title · Pane", falling back to ids for unnamed parts.
+    fn notification_location(
+        &self,
+        ws_idx: usize,
+        tab_idx: usize,
+        pane_id: crate::layout::PaneId,
+        workspace_label: &str,
+        public_pane_id: &str,
+    ) -> String {
+        let terminal = self.app.state.workspaces.get(ws_idx).and_then(|workspace| {
+            let pane = workspace.pane_state(pane_id)?;
+            self.app.state.terminals.get(&pane.attached_terminal_id)
+        });
+        let workspace = self.app.state.workspaces.get(ws_idx);
+        let workspace_name = if workspace_label.trim().is_empty() {
+            workspace.map(|ws| ws.id.clone()).unwrap_or_default()
+        } else {
+            workspace_label.to_owned()
+        };
+        let tab_name = workspace
+            .and_then(|ws| ws.tab_display_name(tab_idx))
+            .unwrap_or_else(|| (tab_idx + 1).to_string());
+        let window_title = terminal.and_then(|terminal| terminal.terminal_title_stripped());
+        let pane_name = terminal
+            .and_then(|terminal| terminal.manual_label.clone())
+            .filter(|label| !label.trim().is_empty())
+            .unwrap_or_else(|| public_pane_id.to_owned());
+        [
+            Some(workspace_name),
+            Some(tab_name),
+            window_title,
+            Some(pane_name),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+    }
+
+    /// The agent's latest reply, read from its own session transcript.
+    fn notification_reply(&self, pane_id: crate::layout::PaneId) -> Option<String> {
+        let terminal = self.app.state.workspaces.iter().find_map(|ws| {
+            ws.tabs.iter().find_map(|tab| {
+                let pane = tab.panes.get(&pane_id)?;
+                self.app.state.terminals.get(&pane.attached_terminal_id)
+            })
+        })?;
+        let session = terminal.persisted_agent_session.as_ref()?;
+        if session.session_ref.kind != crate::agent_resume::AgentSessionRefKind::Id {
+            return None;
+        }
+        crate::agent_reply::latest_reply(&session.agent, &session.session_ref.value)
+    }
+
     fn forward_semantic_agent_notification(
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
@@ -90,6 +144,23 @@ impl HeadlessServer {
             workspace.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context =
             crate::app::actions::notification_context(workspace, &workspace_label, ws_idx, pane_id);
+        let body = if self.app.state.toast_config.delivery == crate::config::ToastDelivery::System {
+            let location = self.notification_location(
+                ws_idx,
+                tab_idx,
+                pane_id,
+                &workspace_label,
+                &public_pane_id,
+            );
+            // System banners show the agent's own words under a location subtitle:
+            // "location\nreply". The client splits on the first newline.
+            match self.notification_reply(pane_id) {
+                Some(reply) => format!("{location}\n{reply}"),
+                None => location,
+            }
+        } else {
+            context
+        };
         let agent = known_agent
             .map(crate::detect::agent_label)
             .map(str::to_owned);
@@ -97,7 +168,7 @@ impl HeadlessServer {
             protocol::SemanticNotification {
                 kind: semantic_kind,
                 title: format!("{agent_label} {event_text}"),
-                body: non_empty_body(&context),
+                body: non_empty_body(&body),
                 sound,
                 agent,
                 workspace_id: Some(workspace_id),

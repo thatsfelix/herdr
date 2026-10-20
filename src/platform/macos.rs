@@ -1588,17 +1588,16 @@ pub(crate) fn show_actionable_desktop_notification(
     // Non-interactive on purpose: the notifier exits right after delivery and
     // the click is resolved by the command stored in the notification itself.
     let group = format!("herdr-{}", registration.token);
-    let spawned = Command::new(program)
-        .args([
-            "-title",
-            title,
-            "-message",
-            body.unwrap_or_default(),
-            "-group",
-            &group,
-            "-execute",
-            &registration.command,
-        ])
+    // "subtitle\nmessage": location first, the agent's reply as the message.
+    let body = body.unwrap_or_default();
+    let (subtitle, message) = split_notification_body(body);
+    let mut command = Command::new(program);
+    command.args(["-title", title, "-message", message]);
+    if let Some(subtitle) = subtitle {
+        command.args(["-subtitle", subtitle]);
+    }
+    let spawned = command
+        .args(["-group", &group, "-execute", &registration.command])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1619,6 +1618,14 @@ pub(crate) fn show_actionable_desktop_notification(
             notification_clicks::unregister(&registration.token);
             Err(err)
         }
+    }
+}
+
+/// "location\nreply" becomes subtitle and message; a location-only body stays the message.
+fn split_notification_body(body: &str) -> (Option<&str>, &str) {
+    match body.split_once('\n') {
+        Some((subtitle, message)) if !message.trim().is_empty() => (Some(subtitle), message),
+        _ => (None, body),
     }
 }
 
@@ -1701,5 +1708,28 @@ mod notification_click_routing_tests {
         click(&socket, &three.token);
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(third.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod notification_body_split_tests {
+    use super::split_notification_body;
+
+    #[test]
+    fn location_and_reply_split_into_subtitle_and_message() {
+        assert_eq!(
+            split_notification_body("ws · tab · pane\n42"),
+            (Some("ws · tab · pane"), "42")
+        );
+    }
+
+    #[test]
+    fn location_only_bodies_stay_whole_messages() {
+        assert_eq!(split_notification_body("ws · tab"), (None, "ws · tab"));
+        assert_eq!(
+            split_notification_body("ws · tab\n  "),
+            (None, "ws · tab\n  ")
+        );
+        assert_eq!(split_notification_body(""), (None, ""));
     }
 }

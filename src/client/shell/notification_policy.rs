@@ -238,9 +238,18 @@ impl ClientShellState {
                             }
                         })
                     });
+                    // A remote notification starts with its machine so it is never
+                    // mistaken for a local one.
+                    let body = pending.event.body.map(|body| {
+                        if pending.endpoint_id == ClientEndpointId::Local {
+                            body
+                        } else {
+                            format!("{} · {body}", self.endpoint_label(&pending.endpoint_id))
+                        }
+                    });
                     effects.push(ClientShellNotificationEffect::System {
                         title: pending.event.title,
-                        body: pending.event.body,
+                        body,
                         target,
                     });
                 }
