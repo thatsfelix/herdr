@@ -6,10 +6,6 @@ use crate::protocol::NotifyKind;
 
 use super::shell;
 
-#[cfg(not(windows))]
-use crate::platform::show_desktop_notification as show_untargeted_system_notification;
-
-#[cfg(windows)]
 fn queue_system_notification(
     task: impl FnOnce() -> io::Result<bool> + Send + 'static,
 ) -> io::Result<bool> {
@@ -40,7 +36,6 @@ fn queue_system_notification(
     Ok(true)
 }
 
-#[cfg(windows)]
 fn show_untargeted_system_notification(title: &str, body: Option<&str>) -> io::Result<bool> {
     let title = title.to_owned();
     let body = body.map(str::to_owned);
@@ -52,7 +47,7 @@ fn show_untargeted_system_notification(title: &str, body: Option<&str>) -> io::R
 pub(super) fn handle_shell_notification_effects(
     effects: Vec<shell::ClientShellNotificationEffect>,
     sound_config: &crate::config::SoundConfig,
-    #[cfg(windows)] event_tx: &tokio::sync::mpsc::Sender<super::events::ClientLoopEvent>,
+    event_tx: &tokio::sync::mpsc::Sender<super::events::ClientLoopEvent>,
 ) {
     for effect in effects {
         match effect {
@@ -71,13 +66,9 @@ pub(super) fn handle_shell_notification_effects(
             shell::ClientShellNotificationEffect::System {
                 title,
                 body,
-                #[cfg(windows)]
                 target,
             } => {
-                #[cfg(windows)]
                 let result = show_system_notification(&title, body.as_deref(), target, event_tx);
-                #[cfg(not(windows))]
-                let result = crate::platform::show_desktop_notification(&title, body.as_deref());
                 if let Err(err) = result {
                     warn!(err = %err, "failed to emit system notification");
                 }
@@ -86,7 +77,6 @@ pub(super) fn handle_shell_notification_effects(
     }
 }
 
-#[cfg(windows)]
 fn show_system_notification(
     title: &str,
     body: Option<&str>,
@@ -193,7 +183,7 @@ pub(super) fn sound_from_notify_message(message: &str) -> Option<crate::sound::S
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

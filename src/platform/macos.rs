@@ -1427,3 +1427,279 @@ printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
         assert!(argv[2].contains("/tmp/herdr scrollback.txt"));
     }
 }
+
+/// Click routing for actionable notifications.
+///
+/// Every notification carries its own `-execute` command (stored in its
+/// userInfo), so whichever notifier process or cold launch of the shared
+/// bundle receives the click runs the right command. The command writes a
+/// one-shot token to this client's private socket, which resolves it to the
+/// callback registered for exactly that notification.
+mod notification_clicks {
+    use std::collections::{HashMap, VecDeque};
+    use std::io::{BufRead, BufReader, Read};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    pub(super) type Callback = Arc<dyn Fn() + Send + Sync>;
+
+    const MAX_PENDING: usize = 256;
+
+    #[derive(Default)]
+    struct Registry {
+        callbacks: HashMap<String, Callback>,
+        order: VecDeque<String>,
+    }
+
+    struct Router {
+        socket: PathBuf,
+        registry: Arc<Mutex<Registry>>,
+    }
+
+    static ROUTER: OnceLock<Option<Router>> = OnceLock::new();
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn router() -> Option<&'static Router> {
+        ROUTER
+            .get_or_init(|| match start() {
+                Ok(router) => Some(router),
+                Err(err) => {
+                    tracing::warn!(err = %err, "notification click socket unavailable");
+                    None
+                }
+            })
+            .as_ref()
+    }
+
+    fn start() -> std::io::Result<Router> {
+        let socket = std::env::temp_dir().join(format!("herdr-notify-{}.sock", std::process::id()));
+        remove_stale_sockets();
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket)?;
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
+        let registry = Arc::new(Mutex::new(Registry::default()));
+        let shared = Arc::clone(&registry);
+        std::thread::Builder::new()
+            .name("notification-clicks".into())
+            .spawn(move || {
+                for stream in listener.incoming().filter_map(Result::ok) {
+                    let mut line = String::new();
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    if BufReader::new(stream.take(128))
+                        .read_line(&mut line)
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let token = line.trim();
+                    let callback = shared.lock().ok().and_then(|mut registry| {
+                        registry.order.retain(|queued| queued != token);
+                        registry.callbacks.remove(token)
+                    });
+                    tracing::info!(found = callback.is_some(), "notification click received");
+                    if let Some(callback) = callback {
+                        callback();
+                    }
+                }
+            })?;
+        Ok(Router { socket, registry })
+    }
+
+    /// Sockets left behind by clients that exited: nothing accepts on them.
+    fn remove_stale_sockets() {
+        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("herdr-notify-")
+                && name.ends_with(".sock")
+                && std::os::unix::net::UnixStream::connect(entry.path())
+                    .is_err_and(|err| err.kind() == std::io::ErrorKind::ConnectionRefused)
+            {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    pub(super) struct Registration {
+        pub(super) token: String,
+        pub(super) command: String,
+    }
+
+    /// Registers a one-shot callback and returns the shell command the
+    /// notification must run when clicked.
+    pub(super) fn register(callback: Callback) -> Option<Registration> {
+        let router = router()?;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let token = format!(
+            "{}-{}-{:x}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
+            nanos
+        );
+        {
+            let mut registry = router.registry.lock().ok()?;
+            registry.order.push_back(token.clone());
+            registry.callbacks.insert(token.clone(), callback);
+            while registry.order.len() > MAX_PENDING {
+                if let Some(old) = registry.order.pop_front() {
+                    registry.callbacks.remove(&old);
+                }
+            }
+        }
+        let socket = router.socket.to_string_lossy().replace('\'', "'\\''");
+        let command = format!("/usr/bin/printf '%s\\n' '{token}' | /usr/bin/nc -U -w 2 '{socket}'");
+        Some(Registration { token, command })
+    }
+
+    pub(super) fn unregister(token: &str) {
+        if let Some(router) = router() {
+            if let Ok(mut registry) = router.registry.lock() {
+                registry.callbacks.remove(token);
+                registry.order.retain(|queued| queued != token);
+            }
+        }
+    }
+}
+
+pub(crate) fn show_actionable_desktop_notification(
+    title: &str,
+    body: Option<&str>,
+    _key: String,
+    callback: std::sync::Arc<dyn Fn() + Send + Sync>,
+) -> std::io::Result<bool> {
+    let Some(registration) = notification_clicks::register(callback) else {
+        return show_desktop_notification(title, body);
+    };
+    let custom = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Applications/Herdr notifier.app/Contents/MacOS/terminal-notifier"));
+    let program = custom
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("terminal-notifier"));
+    // Non-interactive on purpose: the notifier exits right after delivery and
+    // the click is resolved by the command stored in the notification itself.
+    let group = format!("herdr-{}", registration.token);
+    let spawned = Command::new(program)
+        .args([
+            "-title",
+            title,
+            "-message",
+            body.unwrap_or_default(),
+            "-group",
+            &group,
+            "-execute",
+            &registration.command,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(mut child) => {
+            let token = registration.token;
+            std::thread::spawn(move || {
+                let delivered = child.wait().is_ok_and(|status| status.success());
+                if !delivered {
+                    tracing::warn!("macOS notifier failed to deliver");
+                    notification_clicks::unregister(&token);
+                }
+            });
+            Ok(true)
+        }
+        Err(err) => {
+            notification_clicks::unregister(&registration.token);
+            Err(err)
+        }
+    }
+}
+
+pub(crate) fn foreground_desktop_notification_host() {
+    // A validated in-client target is selected separately by endpoint activation.
+    if let Ok(url) = std::env::var("WARP_FOCUS_URL") {
+        if url.starts_with("warp://") {
+            let _ = Command::new("/usr/bin/open").arg(url).spawn();
+        }
+    }
+}
+
+#[cfg(test)]
+mod notification_click_routing_tests {
+    use super::notification_clicks::{register, unregister};
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn socket_of(command: &str) -> String {
+        let start = command.rfind("-w 2 '").unwrap() + 6;
+        command[start..command.len() - 1].to_owned()
+    }
+
+    fn click(socket: &str, token: &str) {
+        let mut stream = UnixStream::connect(socket).unwrap();
+        writeln!(stream, "{token}").unwrap();
+    }
+
+    fn wait_for(counter: &AtomicUsize, want: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if counter.load(Ordering::SeqCst) == want {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    #[test]
+    fn click_reaches_only_its_own_callback_once() {
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let a = Arc::clone(&first);
+        let b = Arc::clone(&second);
+        let one = register(Arc::new(move || {
+            a.fetch_add(1, Ordering::SeqCst);
+        }))
+        .unwrap();
+        let two = register(Arc::new(move || {
+            b.fetch_add(1, Ordering::SeqCst);
+        }))
+        .unwrap();
+        let socket = socket_of(&one.command);
+
+        // Out-of-order click: the second notification first.
+        click(&socket, &two.token);
+        assert!(wait_for(&second, 1));
+        assert_eq!(first.load(Ordering::SeqCst), 0);
+
+        // A repeated or unknown token is ignored.
+        click(&socket, &two.token);
+        click(&socket, "unknown");
+        click(&socket, &one.token);
+        assert!(wait_for(&first, 1));
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(second.load(Ordering::SeqCst), 1);
+
+        // Unregistered (failed delivery) tokens never fire.
+        let third = Arc::new(AtomicUsize::new(0));
+        let c = Arc::clone(&third);
+        let three = register(Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+        }))
+        .unwrap();
+        unregister(&three.token);
+        click(&socket, &three.token);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(third.load(Ordering::SeqCst), 0);
+    }
+}

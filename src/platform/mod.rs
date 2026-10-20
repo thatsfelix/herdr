@@ -1044,3 +1044,17 @@ pub(crate) fn shared_ssh_control_path(
         "interactive SSH recovery requires Unix OpenSSH multiplexing",
     ))
 }
+
+// Platforms without native click callbacks retain untargeted delivery.
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn show_actionable_desktop_notification(
+    title: &str,
+    body: Option<&str>,
+    _key: String,
+    _callback: std::sync::Arc<dyn Fn() + Send + Sync>,
+) -> std::io::Result<bool> {
+    show_desktop_notification(title, body)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub(crate) fn foreground_desktop_notification_host() {}
