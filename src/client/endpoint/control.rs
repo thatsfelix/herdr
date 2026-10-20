@@ -10,6 +10,7 @@ pub(crate) enum EndpointControlMessage {
     HealthPong,
     AgentViewProjection(DecodedAgentViewProjection),
     AgentCompletions(crate::protocol::endpoint::EndpointAgentCompletions),
+    ShellCommandCompleted(crate::protocol::endpoint::EndpointShellCommandCompleted),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
 }
@@ -20,6 +21,11 @@ pub(crate) fn decode_endpoint_control(
 ) -> Result<EndpointControlMessage, String> {
     if kind == crate::protocol::endpoint::HEALTH_PONG_KIND {
         return Ok(EndpointControlMessage::HealthPong);
+    }
+    if kind == crate::protocol::endpoint::SHELL_COMMAND_COMPLETED_KIND {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::ShellCommandCompleted)
+            .unwrap_or(EndpointControlMessage::Ignored));
     }
     if kind == crate::protocol::endpoint::AGENT_COMPLETIONS_KIND {
         return Ok(serde_json::from_str(data)
@@ -103,6 +109,38 @@ mod tests {
         assert_eq!(decoded, projection);
         assert!(matches!(
             decode_endpoint_control(&kind, "invalid").unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+    }
+
+    #[test]
+    fn shell_command_notification_control_is_optional_and_preserves_output() {
+        let event = crate::protocol::endpoint::EndpointShellCommandCompleted {
+            boot_id: "boot".into(),
+            terminal_id: "term".into(),
+            pane_id: "w1:p2".into(),
+            sequence: 7,
+            exit_code: 0,
+            duration_ms: 10_000,
+            output: Some("42\n完成".into()),
+        };
+        let crate::protocol::ServerMessage::EndpointControl { kind, data } =
+            crate::protocol::endpoint::shell_command_completed_message(&event).unwrap()
+        else {
+            panic!("expected optional JSON control");
+        };
+        let EndpointControlMessage::ShellCommandCompleted(decoded) =
+            decode_endpoint_control(&kind, &data).unwrap()
+        else {
+            panic!("expected shell completion");
+        };
+        assert_eq!(decoded, event);
+        assert!(matches!(
+            decode_endpoint_control(&kind, "{}").unwrap(),
+            EndpointControlMessage::Ignored
+        ));
+        assert!(matches!(
+            decode_endpoint_control("endpoint.shell-command-completed.v2", &data).unwrap(),
             EndpointControlMessage::Ignored
         ));
     }

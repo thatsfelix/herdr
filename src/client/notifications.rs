@@ -65,10 +65,17 @@ pub(super) fn handle_shell_notification_effects(
             }
             shell::ClientShellNotificationEffect::System {
                 title,
+                subtitle,
                 body,
                 target,
             } => {
-                let result = show_system_notification(&title, body.as_deref(), target, event_tx);
+                let result = show_system_notification(
+                    &title,
+                    subtitle.as_deref(),
+                    body.as_deref(),
+                    target,
+                    event_tx,
+                );
                 if let Err(err) = result {
                     warn!(err = %err, "failed to emit system notification");
                 }
@@ -79,12 +86,14 @@ pub(super) fn handle_shell_notification_effects(
 
 fn show_system_notification(
     title: &str,
+    subtitle: Option<&str>,
     body: Option<&str>,
     target: Option<shell::ClientSystemNotificationTarget>,
     event_tx: &tokio::sync::mpsc::Sender<super::events::ClientLoopEvent>,
 ) -> io::Result<bool> {
     let Some(target) = target else {
-        return show_untargeted_system_notification(title, body);
+        let message = crate::platform::desktop_notification_message(subtitle, body);
+        return show_untargeted_system_notification(title, message.as_deref());
     };
     let key = serde_json::to_string(&(
         &target.endpoint_id.storage_key(),
@@ -95,10 +104,12 @@ fn show_system_notification(
     let event_tx = event_tx.clone();
     let runtime = tokio::runtime::Handle::current();
     let title = title.to_owned();
+    let subtitle = subtitle.map(str::to_owned);
     let body = body.map(str::to_owned);
     queue_system_notification(move || {
         crate::platform::show_actionable_desktop_notification(
             &title,
+            subtitle.as_deref(),
             body.as_deref(),
             key,
             std::sync::Arc::new(move || {

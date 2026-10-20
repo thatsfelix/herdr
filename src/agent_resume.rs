@@ -136,7 +136,10 @@ pub fn persisted_session_from_launch_args(
     agent: crate::detect::Agent,
     args: &[String],
 ) -> Option<PersistedAgentSession> {
-    let [command, session_id] = args else {
+    // This flag only changes process isolation, not the selected session. Keep
+    // rejecting other options (especially --last and --remote) rather than guessing.
+    let mut args = args.iter().filter(|arg| arg.as_str() != "--no-daemon");
+    let (Some(command), Some(session_id), None) = (args.next(), args.next(), args.next()) else {
         return None;
     };
     if agent != crate::detect::Agent::Codex || command != "resume" || session_id.starts_with('-') {
@@ -448,6 +451,37 @@ mod tests {
             ]
         )
         .is_none());
+    }
+
+    #[test]
+    fn codex_isolated_resume_keeps_the_explicit_session() {
+        for args in [
+            vec!["--no-daemon", "resume", "session-42"],
+            vec!["resume", "--no-daemon", "session-42"],
+            vec!["resume", "session-42", "--no-daemon"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let session =
+                persisted_session_from_launch_args(crate::detect::Agent::Codex, &args).unwrap();
+            assert_eq!(session.session_ref.value, "session-42");
+        }
+        for args in [
+            vec!["--no-daemon"],
+            vec!["resume", "--last", "--no-daemon"],
+            vec!["resume", "session-42", "--last", "--no-daemon"],
+            vec![
+                "--remote",
+                "ws://example.test",
+                "resume",
+                "session-42",
+                "--no-daemon",
+            ],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(
+                persisted_session_from_launch_args(crate::detect::Agent::Codex, &args).is_none()
+            );
+        }
     }
 
     #[test]

@@ -78,10 +78,14 @@ fn claude_transcript(session_id: &str) -> Option<PathBuf> {
 
 fn codex_rollout(session_id: &str) -> Option<PathBuf> {
     let sessions = config_root("CODEX_HOME", ".codex")?.join("sessions");
+    codex_rollout_in(&sessions, session_id)
+}
+
+fn codex_rollout_in(sessions: &Path, session_id: &str) -> Option<PathBuf> {
     let suffix = format!("-{session_id}.jsonl");
     let mut visited = 0usize;
     // Year/month/day shards, newest first: a live session is almost always recent.
-    for year in sorted_dirs_desc(&sessions) {
+    for year in sorted_dirs_desc(sessions) {
         for month in sorted_dirs_desc(&year) {
             for day in sorted_dirs_desc(&month) {
                 visited += 1;
@@ -365,6 +369,60 @@ mod tests {
             "\n",
         );
         assert_eq!(codex_reply(tail), None);
+    }
+
+    #[test]
+    fn codex_lookup_never_substitutes_a_same_directory_session() {
+        struct TestDir(PathBuf);
+        impl Drop for TestDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "herdr-codex-reply-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let _cleanup = TestDir(root.clone());
+        let day = root.join("2026/10/20");
+        std::fs::create_dir_all(&day).unwrap();
+        for (session, message) in [("session-a", "42"), ("session-b", "other session")] {
+            let path = day.join(format!("rollout-2026-10-20-{session}.jsonl"));
+            let metadata = serde_json::json!({"type":"session_meta","payload":{"id":session,"cwd":"/same-directory"}});
+            let complete = serde_json::json!({"type":"event_msg","payload":{"type":"task_complete","last_agent_message":message}});
+            std::fs::write(path, format!("{metadata}\n{complete}\n")).unwrap();
+        }
+        let first = codex_rollout_in(&root, "session-a").unwrap();
+        assert_eq!(
+            codex_reply(&read_tail(&first).unwrap()).as_deref(),
+            Some("42")
+        );
+        let second = codex_rollout_in(&root, "session-b").unwrap();
+        assert_eq!(
+            codex_reply(&read_tail(&second).unwrap()).as_deref(),
+            Some("other session")
+        );
+        assert!(codex_rollout_in(&root, "missing-session").is_none());
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&first)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"event_msg","payload":{"type":"task_started"}})
+        )
+        .unwrap();
+        assert_eq!(codex_reply(&read_tail(&first).unwrap()), None);
+        // A partial write must not revive the previous turn's reply.
+        write!(file, "{{\"type\":\"response_item\"").unwrap();
+        assert_eq!(codex_reply(&read_tail(&first).unwrap()), None);
     }
 
     #[test]

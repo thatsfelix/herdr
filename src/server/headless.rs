@@ -82,6 +82,7 @@ mod native_graphics;
 mod notifications;
 mod render;
 mod retained_surface;
+mod shell_commands;
 mod surface_interest;
 
 // Producers can refill even a bounded channel while it is being drained.
@@ -214,6 +215,7 @@ pub struct HeadlessServer {
     popup_owner_tab_id: Option<String>,
     /// Process-local identity used to reject shell replacements from an earlier server boot.
     client_shell_boot_id: String,
+    shell_command_sequence: u64,
     /// Outer window title last pushed, paired with the client that received it.
     /// Keying on the client means a newly attached terminal is written to even
     /// when the title itself has not changed, without every code path that
@@ -366,6 +368,7 @@ impl HeadlessServer {
             foreground_client_id: None,
             tab_geometry_controllers: HashMap::new(),
             popup_owner_tab_id: None,
+            shell_command_sequence: 0,
             client_shell_boot_id: format!(
                 "{}-{}",
                 std::process::id(),

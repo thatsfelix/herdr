@@ -17,6 +17,14 @@ use crate::layout::PaneId;
 pub struct TerminalRuntime(crate::pane::PaneRuntime);
 
 impl TerminalRuntime {
+    pub(crate) fn cancel_shell_command(&self) {
+        self.0.cancel_shell_command();
+    }
+
+    pub(crate) fn shell_command_generation(&self) -> Option<u64> {
+        self.0.shell_command_generation()
+    }
+
     pub fn shutdown(self) {
         self.0.shutdown();
     }

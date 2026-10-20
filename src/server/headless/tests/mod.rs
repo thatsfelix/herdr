@@ -117,6 +117,7 @@ fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServ
         tab_geometry_controllers: HashMap::new(),
         popup_owner_tab_id: None,
         client_shell_boot_id: "test-boot".into(),
+        shell_command_sequence: 0,
         sent_window_title: None,
         api_window_title: None,
         server_keybindings,
@@ -198,6 +199,62 @@ fn default_headless_size_is_effective_without_clients() {
         )
     );
     assert_eq!(server.effective_size, server.headless_size);
+}
+
+#[tokio::test]
+async fn shell_command_server_rejects_rebound_closed_and_agent_terminals() {
+    let mut server = test_headless_server();
+    server.app.state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+    server.app.state.ensure_test_terminals();
+    let pane_id = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal_id = server.app.state.workspaces[0].tabs[0].panes[&pane_id]
+        .attached_terminal_id
+        .clone();
+    let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+    let generation = runtime.shell_command_generation().unwrap();
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal_id.clone(), runtime);
+    let mut command = crate::pane::shell_command::ShellCommandCompletion {
+        generation,
+        sequence: 1,
+        exit_code: 0,
+        duration_ms: 10000,
+        output: Some("42".into()),
+    };
+    server.forward_shell_command_completed(pane_id, &command);
+    assert_eq!(server.shell_command_sequence, 1);
+    let replacement = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+    let new_generation = replacement.shell_command_generation().unwrap();
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal_id.clone(), replacement);
+    server.forward_shell_command_completed(pane_id, &command);
+    assert_eq!(
+        server.shell_command_sequence, 1,
+        "queued old event must not target replacement"
+    );
+    command.generation = new_generation;
+    server
+        .app
+        .state
+        .terminals
+        .get_mut(&terminal_id)
+        .unwrap()
+        .detected_agent = Some(crate::detect::Agent::Claude);
+    server.forward_shell_command_completed(pane_id, &command);
+    assert_eq!(
+        server.shell_command_sequence, 1,
+        "agent must not produce a shell notification"
+    );
+    server.app.state.workspaces.clear();
+    server.forward_shell_command_completed(pane_id, &command);
+    assert_eq!(
+        server.shell_command_sequence, 1,
+        "closed pane must not receive completion"
+    );
 }
 
 #[tokio::test]

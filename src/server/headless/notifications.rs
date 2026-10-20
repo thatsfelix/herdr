@@ -323,6 +323,19 @@ impl HeadlessServer {
         if self.host_shutdown_requested() {
             return false;
         }
+        match &ev {
+            AppEvent::AgentProcessDetected { pane_id, .. }
+            | AppEvent::HookStateReported { pane_id, .. }
+            | AppEvent::AgentSessionReported { pane_id, .. }
+            | AppEvent::StateChanged {
+                pane_id,
+                agent: Some(_),
+                ..
+            } => {
+                self.cancel_shell_command_for_pane(*pane_id);
+            }
+            _ => {}
+        }
         let focus_response = match &mut ev {
             AppEvent::WorktreeAddFinished(result) => result
                 .api_request
@@ -343,6 +356,10 @@ impl HeadlessServer {
             (original, proxy_rx)
         });
         match &ev {
+            AppEvent::ShellCommandCompleted { pane_id, command } => {
+                self.forward_shell_command_completed(*pane_id, command);
+                false
+            }
             AppEvent::TerminalBell { pane_id, count } => {
                 if !self.send_to_foreground_client(ServerMessage::TerminalBell { count: *count }) {
                     debug!(

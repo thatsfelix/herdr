@@ -15,6 +15,62 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
 
+#[cfg(unix)]
+#[test]
+fn shell_command_zsh_asset_preserves_hooks_status_and_opt_in() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let asset =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/integration/assets/shell-command.zsh");
+    let mut child = match Command::new("zsh")
+        .args(["-f", "-i"])
+        .env("HERDR_PANE_ID", "unit-test")
+        .env("HERDR_TEST_ASSET", asset)
+        .env("ZDOTDIR", "/nonexistent-herdr-unit-test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => panic!("zsh test failed to start: {error}"),
+    };
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"PS1=''; RPS1=''; unsetopt promptcr promptsp
+function old_precmd() { print -r -- "OLD-POST:$?"; }
+precmd_functions=(old_precmd)
+source "$HERDR_TEST_ASSET"
+source "$HERDR_TEST_ASSET"
+false
+print -r -- "PRESERVED:$?;HOOKS:${#precmd_functions}"
+HERDR_COMMAND_NOTIFY_THRESHOLD_MS=-1
+true
+HERDR_COMMAND_NOTIFY_THRESHOLD_MS=00000008
+source "$HERDR_TEST_ASSET"
+true
+herdr_command_notify_disable
+function precmd() { return 0; }
+source "$HERDR_TEST_ASSET"
+exit
+"#,
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.matches("HerdrCommand;enable").count(), 2);
+    assert!(stdout.contains("HerdrCommand;start;1;8"), "{stdout}");
+    assert!(stdout.contains("HerdrCommand;end;2;1"), "{stdout}");
+    assert!(stdout.contains("OLD-POST:1"), "{stdout}");
+    assert!(stdout.contains("PRESERVED:1;HOOKS:2"), "{stdout}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("existing precmd function"));
+}
+
 #[test]
 fn windows_powershell_encoded_hook_command_preserves_script_invocation() {
     use base64::Engine;

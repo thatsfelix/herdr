@@ -170,6 +170,7 @@ pub(crate) struct ProcessBytesResult {
     pub clipboard_writes: Vec<Vec<u8>>,
     pub reported_cwd: Option<std::path::PathBuf>,
     pub terminal_responses: Vec<Bytes>,
+    pub shell_commands: Vec<super::shell_command::FrozenCommand>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -215,6 +216,7 @@ pub(crate) struct GhosttyPaneCore {
     pub child_default_background_changed: bool,
     pub osc_debug_tracker: OscDebugTracker,
     pub agent_osc_state: AgentOscStateTracker,
+    shell_commands: super::shell_command::ShellCommandTracker,
     decscusr_tracker: DecscusrTracker,
     cursor_settle_state: CursorPositionSettleState,
     windows_powershell_prompt_cwd_reporting: bool,
@@ -225,6 +227,20 @@ pub(crate) struct PaneTerminal {
 }
 
 impl PaneTerminal {
+    pub(crate) fn cancel_shell_command(&self) {
+        if let Ok(mut core) = self.ghostty.core.lock() {
+            core.shell_commands.cancel();
+        }
+    }
+
+    pub(crate) fn shell_command_generation(&self) -> Option<u64> {
+        self.ghostty
+            .core
+            .lock()
+            .ok()
+            .map(|core| core.shell_commands.generation)
+    }
+
     pub(crate) fn new(ghostty: GhosttyPaneTerminal) -> Self {
         Self { ghostty }
     }
@@ -1201,6 +1217,7 @@ impl GhosttyPaneTerminal {
                 child_default_background_changed: false,
                 osc_debug_tracker: OscDebugTracker::default(),
                 agent_osc_state: AgentOscStateTracker::default(),
+                shell_commands: super::shell_command::ShellCommandTracker::default(),
                 decscusr_tracker: DecscusrTracker::default(),
                 cursor_settle_state: CursorPositionSettleState::default(),
                 windows_powershell_prompt_cwd_reporting: false,
@@ -1368,6 +1385,7 @@ impl GhosttyPaneTerminal {
                 clipboard_writes: Vec::new(),
                 reported_cwd: None,
                 terminal_responses: Vec::new(),
+                shell_commands: Vec::new(),
             };
         };
 
@@ -1397,6 +1415,12 @@ impl GhosttyPaneTerminal {
             );
         }
         let terminal_title_changed = core.agent_osc_state.observe(bytes);
+        if core.shell_commands.needs_screen_initialization() {
+            let alternate =
+                core.terminal.active_screen().ok() == Some(crate::ghostty::ActiveScreen::Alternate);
+            core.shell_commands.initialize_screen(alternate);
+        }
+        let shell_commands = core.shell_commands.observe(bytes, Instant::now());
 
         core.kitty_keyboard.observe(bytes);
         let mut terminal_responses = Vec::new();
@@ -1485,6 +1509,7 @@ impl GhosttyPaneTerminal {
             clipboard_writes,
             reported_cwd,
             terminal_responses,
+            shell_commands,
         }
     }
 
@@ -4128,6 +4153,40 @@ mod tests {
         let g = u16::from(color.g) * 257;
         let b = u16::from(color.b) * 257;
         Bytes::from(format!("\x1b]{command};rgb:{r:04x}/{g:04x}/{b:04x}\x1b\\"))
+    }
+
+    #[test]
+    fn shell_command_pty_freezes_output_and_cancels_input_or_alternate() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 100).unwrap();
+        let pane = PaneTerminal::new(GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap());
+        let pane_id = PaneId::from_raw(1);
+        let start = b"\x1b]1337;HerdrCommand;enable\x07\x1b]1337;HerdrCommand;start;1;0\x07";
+        let end = b"\x1b]1337;HerdrCommand;end;1;0\x07";
+        pane.process_pty_bytes(pane_id, 0, start, &tx);
+        pane.process_pty_bytes(pane_id, 0, b"42", &tx);
+        let completed = pane.process_pty_bytes(pane_id, 0, end, &tx);
+        assert_eq!(completed.shell_commands.len(), 1);
+        assert_eq!(
+            completed.shell_commands[0]
+                .clone()
+                .finish()
+                .output
+                .as_deref(),
+            Some("42")
+        );
+        pane.process_pty_bytes(pane_id, 0, start, &tx);
+        pane.cancel_shell_command();
+        assert!(pane
+            .process_pty_bytes(pane_id, 0, end, &tx)
+            .shell_commands
+            .is_empty());
+        pane.process_pty_bytes(pane_id, 0, start, &tx);
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[?1049hsecret\x1b[?1049l", &tx);
+        assert!(pane
+            .process_pty_bytes(pane_id, 0, end, &tx)
+            .shell_commands
+            .is_empty());
     }
 
     #[test]

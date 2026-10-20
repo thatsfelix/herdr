@@ -30,6 +30,7 @@ mod cursor;
 mod input;
 mod kitty_keyboard;
 mod osc;
+pub(crate) mod shell_command;
 mod state;
 mod terminal;
 mod xtgettcap;
@@ -1085,6 +1086,7 @@ fn spawn_basic_detection_task(
                 );
                 last_foreground_pgid = tracked_process_group_id;
                 if new_agent.is_some() {
+                    terminal.cancel_shell_command();
                     acquisition_started_at = None;
                     last_content_change_at = None;
                 } else if agent_presence.current_agent().is_none()
@@ -2590,6 +2592,12 @@ impl PaneRuntime {
                 content_seq.fetch_add(1, Ordering::Release);
                 drop(_content_write_guard);
                 compression_wake.wake();
+                for command in result.shell_commands {
+                    let _ = read_events.try_send(AppEvent::ShellCommandCompleted {
+                        pane_id,
+                        command: command.finish(),
+                    });
+                }
                 publish_terminal_bells(pane_id, result.terminal_bells, &read_events);
                 observe_detection_content_change(bytes, &detection_content_seq);
                 let title_requested =
@@ -2793,6 +2801,12 @@ impl PaneRuntime {
                 content_seq.fetch_add(1, Ordering::Release);
                 drop(_content_write_guard);
                 compression_wake.wake();
+                for command in result.shell_commands {
+                    let _ = events.try_send(AppEvent::ShellCommandCompleted {
+                        pane_id,
+                        command: command.finish(),
+                    });
+                }
                 publish_terminal_bells(pane_id, result.terminal_bells, &events);
                 if agent_detection == AgentDetection::Enabled {
                     observe_detection_content_change(bytes, &detection_content_seq);
@@ -3055,6 +3069,7 @@ impl PaneRuntime {
                             );
                             last_foreground_pgid = tracked_process_group_id;
                             if new_agent.is_some() {
+                                terminal.cancel_shell_command();
                                 acquisition_started_at = None;
                                 last_content_change_at = None;
                             } else if agent_presence.current_agent().is_none()
@@ -3670,7 +3685,18 @@ impl PaneRuntime {
         self.terminal.encode_terminal_key(key)
     }
 
+    pub(crate) fn cancel_shell_command(&self) {
+        self.terminal.cancel_shell_command();
+    }
+
+    pub(crate) fn shell_command_generation(&self) -> Option<u64> {
+        self.terminal.shell_command_generation()
+    }
+
     pub fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        if !bytes.is_empty() {
+            self.cancel_shell_command();
+        }
         self.io.try_send_bytes(bytes)
     }
 
@@ -3696,6 +3722,7 @@ impl PaneRuntime {
         delay: std::time::Duration,
         deadline: Option<std::time::Instant>,
     ) -> std::io::Result<std::sync::mpsc::Receiver<std::io::Result<()>>> {
+        self.cancel_shell_command();
         self.io
             .queue_user_input_submission(text, enter, delay, deadline)
     }

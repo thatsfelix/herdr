@@ -31,6 +31,29 @@ pub const AGENT_VIEW_PROJECTION_CAPABILITY: &str = "agent_view_projection";
 pub const AGENT_VIEW_PROJECTION_KIND: &str = "endpoint.agent-view.v1";
 pub const AGENT_COMPLETIONS_CAPABILITY: &str = "agent_completions";
 pub const AGENT_COMPLETIONS_KIND: &str = "endpoint.agent-completions.v1";
+pub const SHELL_COMMAND_COMPLETED_KIND: &str = "endpoint.shell-command-completed.v1";
+
+/// Optional JSON event, deliberately not reachable from a frozen binary codec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EndpointShellCommandCompleted {
+    pub boot_id: String,
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub sequence: u64,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+}
+
+pub fn shell_command_completed_message(
+    event: &EndpointShellCommandCompleted,
+) -> serde_json::Result<ServerMessage> {
+    Ok(ServerMessage::EndpointControl {
+        kind: SHELL_COMMAND_COMPLETED_KIND.into(),
+        data: serde_json::to_string(event)?,
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointAgentCompletions {
@@ -278,6 +301,30 @@ mod tests {
         assert_eq!(welcome.input_codec, INPUT_CODEC_V1);
         assert_eq!(welcome.blob_codec, BLOB_CODEC_V1);
         assert!(welcome.capabilities.is_empty());
+    }
+
+    #[test]
+    fn shell_command_optional_json_round_trips_without_output() {
+        let event = EndpointShellCommandCompleted {
+            boot_id: "boot".into(),
+            terminal_id: "terminal_1".into(),
+            pane_id: "w1:p2".into(),
+            sequence: 42,
+            exit_code: 7,
+            duration_ms: 10000,
+            output: None,
+        };
+        let ServerMessage::EndpointControl { kind, data } =
+            shell_command_completed_message(&event).unwrap()
+        else {
+            panic!("optional control expected")
+        };
+        assert_eq!(kind, SHELL_COMMAND_COMPLETED_KIND);
+        assert!(!data.contains("output"));
+        assert_eq!(
+            serde_json::from_str::<EndpointShellCommandCompleted>(&data).unwrap(),
+            event
+        );
     }
 
     #[test]

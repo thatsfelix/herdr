@@ -76,6 +76,11 @@ pub(crate) struct WorktreeReadData {
 /// An event from a background task to the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// Frozen opt-in shell command output; never part of the stable wire codec.
+    ShellCommandCompleted {
+        pane_id: PaneId,
+        command: crate::pane::shell_command::ShellCommandCompletion,
+    },
     /// A pane's child process exited.
     PaneDied {
         pane_id: PaneId,

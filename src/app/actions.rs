@@ -1619,7 +1619,7 @@ impl AppState {
             }
             // Host-local effects are intercepted by HeadlessServer and forwarded to the
             // foreground client; they never touch AppState. Kept for AppEvent exhaustiveness.
-            AppEvent::TerminalBell { .. } => Vec::new(),
+            AppEvent::TerminalBell { .. } | AppEvent::ShellCommandCompleted { .. } => Vec::new(),
             AppEvent::ClipboardWrite { .. } => Vec::new(),
             AppEvent::TerminalCwdReported { pane_id, cwd } => {
                 if !cwd.is_absolute() || !cwd.is_dir() {

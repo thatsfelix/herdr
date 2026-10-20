@@ -42,6 +42,73 @@ fn public_move(
 }
 
 #[tokio::test]
+async fn shell_command_queued_completion_uses_moved_identity_and_rejects_closed_pane() {
+    let mut server = pane_move_server();
+    let source = server.app.state.workspaces[0].tabs[0].root_pane;
+    let terminal_id = server.app.state.workspaces[0].tabs[0]
+        .terminal_id(source)
+        .unwrap()
+        .clone();
+    let runtime = crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+    let command = crate::pane::shell_command::ShellCommandCompletion {
+        generation: runtime.shell_command_generation().unwrap(),
+        sequence: 1,
+        exit_code: 7,
+        duration_ms: 10000,
+        output: Some("42".into()),
+    };
+    server
+        .app
+        .terminal_runtimes
+        .insert(terminal_id.clone(), runtime);
+    let source_id = server.app.public_pane_id(0, source).unwrap();
+    let destination_id = server.app.public_workspace_id(1);
+    let (control_rx, _render_rx) = connect_test_shell(&mut server, 9, 80, 23);
+    let _ = client_shell_snapshot(&control_rx);
+    let moved = public_move(
+        &mut server,
+        PaneMoveParams {
+            pane_id: source_id,
+            destination: PaneMoveDestination::NewTab {
+                workspace_id: Some(destination_id),
+                label: None,
+            },
+            focus: false,
+        },
+    )
+    .unwrap();
+    server.forward_shell_command_completed(source, &command);
+    assert_eq!(server.shell_command_sequence, 1);
+    // The test writer forwards its queue on a separate thread.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let event = loop {
+        let bytes = control_rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .expect("shell completion before deadline");
+        if let ServerMessage::EndpointControl { kind, data } = read_server_message(bytes) {
+            if kind == protocol::endpoint::SHELL_COMMAND_COMPLETED_KIND {
+                break serde_json::from_str::<protocol::endpoint::EndpointShellCommandCompleted>(
+                    &data,
+                )
+                .unwrap();
+            }
+        }
+    };
+    assert_eq!(event.pane_id, moved.pane.pane_id);
+    assert_eq!(event.terminal_id, terminal_id.to_string());
+    assert_eq!(event.sequence, 1);
+    assert!(!server.app.state.workspaces[1].close_pane(source));
+    assert!(server.app.state.workspaces[1]
+        .find_tab_index_for_pane(source)
+        .is_none());
+    server.forward_shell_command_completed(source, &command);
+    assert_eq!(server.shell_command_sequence, 1);
+    for workspace in &server.app.state.workspaces {
+        workspace.assert_invariants_for_test();
+    }
+}
+
+#[tokio::test]
 async fn public_pane_move_focus_follows_the_moved_pane() {
     let mut server = pane_move_server();
     let source = server.app.state.workspaces[0].tabs[0].root_pane;

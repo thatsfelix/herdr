@@ -1572,12 +1572,14 @@ mod notification_clicks {
 
 pub(crate) fn show_actionable_desktop_notification(
     title: &str,
+    subtitle: Option<&str>,
     body: Option<&str>,
     _key: String,
     callback: std::sync::Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<bool> {
     let Some(registration) = notification_clicks::register(callback) else {
-        return show_desktop_notification(title, body);
+        let message = super::desktop_notification_message(subtitle, body);
+        return show_desktop_notification(title, message.as_deref());
     };
     let custom = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -1588,27 +1590,32 @@ pub(crate) fn show_actionable_desktop_notification(
     // Non-interactive on purpose: the notifier exits right after delivery and
     // the click is resolved by the command stored in the notification itself.
     let group = format!("herdr-{}", registration.token);
-    // "subtitle\nmessage": location first, the agent's reply as the message.
-    let body = body.unwrap_or_default();
-    let (subtitle, message) = split_notification_body(body);
     let mut command = Command::new(program);
-    command.args(["-title", title, "-message", message]);
-    if let Some(subtitle) = subtitle {
-        command.args(["-subtitle", subtitle]);
-    }
+    notification_content_args(&mut command, title, subtitle, body);
     let spawned = command
         .args(["-group", &group, "-execute", &registration.command])
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn();
     match spawned {
-        Ok(mut child) => {
+        Ok(child) => {
             let token = registration.token;
             std::thread::spawn(move || {
-                let delivered = child.wait().is_ok_and(|status| status.success());
+                let output = child.wait_with_output();
+                let delivered = output.as_ref().is_ok_and(|out| out.status.success());
                 if !delivered {
-                    tracing::warn!("macOS notifier failed to deliver");
+                    match &output {
+                        Ok(out) => tracing::warn!(
+                            status = ?out.status,
+                            stdout = %String::from_utf8_lossy(&out.stdout).trim(),
+                            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                            "macOS notifier failed to deliver"
+                        ),
+                        Err(err) => {
+                            tracing::warn!(error = %err, "macOS notifier failed to deliver")
+                        }
+                    }
                     notification_clicks::unregister(&token);
                 }
             });
@@ -1621,11 +1628,18 @@ pub(crate) fn show_actionable_desktop_notification(
     }
 }
 
-/// "location\nreply" becomes subtitle and message; a location-only body stays the message.
-fn split_notification_body(body: &str) -> (Option<&str>, &str) {
-    match body.split_once('\n') {
-        Some((subtitle, message)) if !message.trim().is_empty() => (Some(subtitle), message),
-        _ => (None, body),
+fn notification_content_args(
+    command: &mut Command,
+    title: &str,
+    subtitle: Option<&str>,
+    body: Option<&str>,
+) {
+    // terminal-notifier prints its usage and exits 1 when the message is empty or
+    // only whitespace, so a notification without a body falls back to its title.
+    let message = body.filter(|body| !body.trim().is_empty()).unwrap_or(title);
+    command.args(["-title", title, "-message", message]);
+    if let Some(subtitle) = subtitle {
+        command.args(["-subtitle", subtitle]);
     }
 }
 
@@ -1712,24 +1726,58 @@ mod notification_click_routing_tests {
 }
 
 #[cfg(test)]
-mod notification_body_split_tests {
-    use super::split_notification_body;
+mod notification_content_tests {
+    use super::notification_content_args;
+    use std::process::Command;
 
     #[test]
-    fn location_and_reply_split_into_subtitle_and_message() {
+    fn notification_keeps_explicit_subtitle_separate_from_multiline_body() {
+        let mut command = Command::new("not-executed");
+        notification_content_args(
+            &mut command,
+            "done",
+            Some("ws · tab · pane"),
+            Some("42\n完成"),
+        );
         assert_eq!(
-            split_notification_body("ws · tab · pane\n42"),
-            (Some("ws · tab · pane"), "42")
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-title",
+                "done",
+                "-message",
+                "42\n完成",
+                "-subtitle",
+                "ws · tab · pane"
+            ]
         );
     }
 
     #[test]
-    fn location_only_bodies_stay_whole_messages() {
-        assert_eq!(split_notification_body("ws · tab"), (None, "ws · tab"));
+    fn notification_without_body_falls_back_to_title() {
+        for body in [None, Some(""), Some("  \n")] {
+            let mut command = Command::new("not-executed");
+            notification_content_args(&mut command, "codex finished", Some("ws"), body);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                [
+                    "-title",
+                    "codex finished",
+                    "-message",
+                    "codex finished",
+                    "-subtitle",
+                    "ws"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn notification_does_not_guess_subtitle_from_custom_body() {
+        let mut command = Command::new("not-executed");
+        notification_content_args(&mut command, "test", None, Some("first\n42"));
         assert_eq!(
-            split_notification_body("ws · tab\n  "),
-            (None, "ws · tab\n  ")
+            command.get_args().collect::<Vec<_>>(),
+            ["-title", "test", "-message", "first\n42"]
         );
-        assert_eq!(split_notification_body(""), (None, ""));
     }
 }

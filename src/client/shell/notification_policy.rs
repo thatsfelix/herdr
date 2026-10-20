@@ -21,6 +21,12 @@ fn notification_duration(kind: SemanticNotificationKind) -> std::time::Duration 
     })
 }
 
+/// An unnamed tab or pane shows its number (`t1`, `p1`); the workspace is already
+/// named or shown before it, so repeating the `w8N:` prefix only adds noise.
+fn short_id(id: &str) -> String {
+    id.rsplit(':').next().unwrap_or(id).to_owned()
+}
+
 impl ClientShellState {
     pub(super) fn retire_endpoint_notifications(&mut self, endpoint_id: &ClientEndpointId) {
         self.pending_notifications
@@ -93,6 +99,117 @@ impl ClientShellState {
                 endpoint_id: notification.endpoint_id,
                 target: Some(ClientEndpointFocusTarget::Pane(pane_id)),
             });
+        }
+    }
+
+    pub(crate) fn receive_shell_command_completed(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        generation: u64,
+        completion: crate::protocol::endpoint::EndpointShellCommandCompleted,
+        now: std::time::Instant,
+    ) -> (Vec<ClientShellNotificationEffect>, bool) {
+        // Shell integration is local-only until remote identity is validated.
+        if !endpoint_id.is_local()
+            || !self.endpoint_is_online(endpoint_id)
+            || self
+                .endpoint_snapshot_identity(endpoint_id, generation)
+                .is_none_or(|(boot_id, _)| boot_id != completion.boot_id)
+            || completion.sequence == 0
+            || completion.terminal_id.is_empty()
+        {
+            return (Vec::new(), false);
+        }
+        if self
+            .shell_command_sequences
+            .get(endpoint_id)
+            .is_some_and(|(boot_id, sequence)| {
+                boot_id == &completion.boot_id && *sequence >= completion.sequence
+            })
+        {
+            return (Vec::new(), false);
+        }
+        self.shell_command_sequences.insert(
+            endpoint_id.clone(),
+            (completion.boot_id.clone(), completion.sequence),
+        );
+        let Some(pane) = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
+            .and_then(|endpoint| endpoint.snapshot.as_deref())
+            .and_then(|snapshot| {
+                snapshot
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_id == completion.pane_id)
+            })
+        else {
+            return (Vec::new(), false);
+        };
+        let event = SemanticNotification {
+            kind: SemanticNotificationKind::Custom,
+            title: format!(
+                "Command finished · exit {} · {}s",
+                completion.exit_code,
+                completion.duration_ms / 1000
+            ),
+            body: Some(
+                completion
+                    .output
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| "No output".into()),
+            ),
+            sound: None,
+            agent: None,
+            workspace_id: Some(pane.workspace_id.clone()),
+            tab_id: Some(pane.tab_id.clone()),
+            pane_id: Some(pane.pane_id.clone()),
+            position: None,
+        };
+        let active = self.notification_target_is_active(endpoint_id, &event);
+        match self.config.toast_delivery {
+            crate::config::ToastDelivery::Herdr if !active => {
+                self.queue_visible_notification(
+                    ClientVisibleNotification {
+                        endpoint_id: endpoint_id.clone(),
+                        event,
+                        deadline: now,
+                    },
+                    now,
+                );
+                (Vec::new(), true)
+            }
+            crate::config::ToastDelivery::Terminal
+                if !active || self.outer_focused == Some(false) =>
+            {
+                (
+                    vec![ClientShellNotificationEffect::Terminal {
+                        title: event.title,
+                        body: event.body,
+                    }],
+                    false,
+                )
+            }
+            crate::config::ToastDelivery::System
+                if !active || self.outer_focused == Some(false) =>
+            {
+                let subtitle = self.notification_location(endpoint_id, &event);
+                (
+                    vec![ClientShellNotificationEffect::System {
+                        title: event.title,
+                        subtitle,
+                        body: event.body,
+                        target: Some(ClientSystemNotificationTarget {
+                            endpoint_id: endpoint_id.clone(),
+                            boot_id: completion.boot_id,
+                            pane_id: completion.pane_id,
+                        }),
+                    }],
+                    false,
+                )
+            }
+            _ => (Vec::new(), false),
         }
     }
 
@@ -212,7 +329,7 @@ impl ClientShellState {
                 crate::config::ToastDelivery::Off => {}
                 crate::config::ToastDelivery::Herdr if !target_active => {
                     let mut event = pending.event;
-                    event.body = event.body.map(|body| split_reply(&body).0.to_owned());
+                    event.body = compact_notification_body(&event);
                     self.queue_visible_notification(
                         ClientVisibleNotification {
                             endpoint_id: pending.endpoint_id,
@@ -225,12 +342,10 @@ impl ClientShellState {
                 }
                 crate::config::ToastDelivery::Herdr => {}
                 crate::config::ToastDelivery::Terminal if !suppress_external => {
+                    let body = compact_notification_body(&pending.event);
                     effects.push(ClientShellNotificationEffect::Terminal {
                         title: pending.event.title,
-                        body: pending
-                            .event
-                            .body
-                            .map(|body| split_reply(&body).0.to_owned()),
+                        body,
                     });
                 }
                 crate::config::ToastDelivery::System if !suppress_external => {
@@ -243,9 +358,11 @@ impl ClientShellState {
                             }
                         })
                     });
-                    let body = self.system_notification_body(&pending.endpoint_id, &pending.event);
+                    let (subtitle, body) =
+                        self.system_notification_content(&pending.endpoint_id, &pending.event);
                     effects.push(ClientShellNotificationEffect::System {
                         title: pending.event.title,
+                        subtitle,
                         body,
                         target,
                     });
@@ -372,7 +489,25 @@ impl ClientShellState {
     }
 }
 
-/// Servers send "context" or "context\nreply"; the reply is the agent's own words.
+fn has_agent_reply(event: &SemanticNotification) -> bool {
+    event.agent.is_some()
+        && matches!(
+            event.kind,
+            SemanticNotificationKind::NeedsAttention | SemanticNotificationKind::Finished
+        )
+}
+
+fn compact_notification_body(event: &SemanticNotification) -> Option<String> {
+    event.body.as_deref().map(|body| {
+        if has_agent_reply(event) {
+            split_reply(body).0.to_owned()
+        } else {
+            body.to_owned()
+        }
+    })
+}
+
+/// Agent notifications carry "context" or "context\nreply"; other bodies are opaque.
 fn split_reply(body: &str) -> (&str, Option<&str>) {
     match body.split_once('\n') {
         Some((context, reply)) if !reply.trim().is_empty() => (context, Some(reply)),
@@ -382,7 +517,7 @@ fn split_reply(body: &str) -> (&str, Option<&str>) {
 }
 
 impl ClientShellState {
-    /// "[Machine · ]Workspace · Tab · Pane" from this client's own projection, with
+    /// "[Machine · ]Workspace / Tab / Pane" from this client's own projection, with
     /// ids standing in for unnamed parts. Only agent-driven notifications have one.
     fn notification_location(
         &self,
@@ -422,30 +557,32 @@ impl ClientShellState {
             .iter()
             .find(|tab| tab.tab_id == tab_id && tab.custom_label)
             .and_then(|tab| named(&tab.label))
-            .unwrap_or_else(|| tab_id.to_owned());
+            .unwrap_or_else(|| short_id(tab_id));
         let pane = snapshot
             .panes
             .iter()
             .find(|pane| pane.pane_id == pane_id)
             .and_then(|pane| pane.label.as_deref())
             .and_then(named)
-            .unwrap_or_else(|| pane_id.to_owned());
-        let mut parts = Vec::with_capacity(4);
+            .unwrap_or_else(|| short_id(pane_id));
+        let place = format!("{workspace} / {tab} / {pane}");
         // With more than one machine the machine leads, so a remote notification is
         // never mistaken for a local one.
         if self.endpoints.len() > 1 {
-            parts.push(self.endpoint_label(endpoint_id).to_owned());
+            Some(format!("{} · {place}", self.endpoint_label(endpoint_id)))
+        } else {
+            Some(place)
         }
-        parts.extend([workspace, tab, pane]);
-        Some(parts.join(" · "))
     }
 
-    /// "location\nreply" when the agent's reply is known, otherwise the location alone.
-    fn system_notification_body(
+    fn system_notification_content(
         &self,
         endpoint_id: &ClientEndpointId,
         event: &SemanticNotification,
-    ) -> Option<String> {
+    ) -> (Option<String>, Option<String>) {
+        if !has_agent_reply(event) {
+            return (None, event.body.clone());
+        }
         let (context, reply) = event.body.as_deref().map_or((None, None), |body| {
             let (context, reply) = split_reply(body);
             (Some(context), reply)
@@ -453,10 +590,7 @@ impl ClientShellState {
         let location = self
             .notification_location(endpoint_id, event)
             .or_else(|| context.map(str::to_owned));
-        match (location, reply) {
-            (Some(location), Some(reply)) => Some(format!("{location}\n{reply}")),
-            (location, _) => location,
-        }
+        (location, reply.map(str::to_owned))
     }
 }
 

@@ -1,6 +1,248 @@
 use super::*;
 
 #[test]
+fn custom_notification_preserves_multiline_body_in_every_delivery_mode() {
+    for delivery in [
+        crate::config::ToastDelivery::Herdr,
+        crate::config::ToastDelivery::Terminal,
+        crate::config::ToastDelivery::System,
+    ] {
+        let mut config = ClientShellConfig::from_config(&Config::default());
+        config.toast_delivery = delivery;
+        let mut state = ClientShellState::new(config);
+        state.set_snapshot(Box::new(snapshot()));
+        let body = "第一行\n42\n最后一行";
+        let (effects, _) = state.receive_notification(
+            &ClientEndpointId::Local,
+            SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: "command".into(),
+                body: Some(body.into()),
+                sound: None,
+                agent: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: None,
+                position: None,
+            },
+            std::time::Instant::now(),
+        );
+        match delivery {
+            crate::config::ToastDelivery::Herdr => assert_eq!(
+                state
+                    .visible_notification
+                    .as_ref()
+                    .unwrap()
+                    .event
+                    .body
+                    .as_deref(),
+                Some(body)
+            ),
+            crate::config::ToastDelivery::Terminal => assert!(matches!(
+                effects.as_slice(),
+                [ClientShellNotificationEffect::Terminal { body: Some(actual), .. }] if actual == body
+            )),
+            crate::config::ToastDelivery::System => assert!(matches!(
+                effects.as_slice(),
+                [ClientShellNotificationEffect::System { body: Some(actual), .. }] if actual == body
+            )),
+            crate::config::ToastDelivery::Off => unreachable!(),
+        }
+    }
+}
+
+#[test]
+fn agent_notification_separates_location_from_numeric_reply() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.toast_delivery = crate::config::ToastDelivery::System;
+    config.toast_delay_seconds = 0;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.outer_focused = Some(false);
+    for reply in [Some("42"), None] {
+        let (effects, _) = state.receive_notification(
+            &ClientEndpointId::Local,
+            SemanticNotification {
+                kind: SemanticNotificationKind::NeedsAttention,
+                title: "Claude".into(),
+                body: Some(reply.map_or_else(
+                    || "old location".into(),
+                    |text| format!("old location\n{text}"),
+                )),
+                sound: None,
+                agent: Some("claude".into()),
+                workspace_id: Some("ws_1".into()),
+                tab_id: Some("tab_1".into()),
+                pane_id: Some("pane_1".into()),
+                position: None,
+            },
+            std::time::Instant::now(),
+        );
+        let [ClientShellNotificationEffect::System {
+            subtitle,
+            body,
+            target,
+            ..
+        }] = effects.as_slice()
+        else {
+            panic!("expected system notification");
+        };
+        assert_eq!(subtitle.as_deref(), Some("client-shell / tab_1 / pane_1"));
+        assert_eq!(body.as_deref(), reply);
+        assert_eq!(target.as_ref().unwrap().boot_id, "boot-1");
+    }
+}
+
+#[test]
+fn shell_command_notification_validates_identity_and_deduplicates() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.toast_delivery = crate::config::ToastDelivery::System;
+    config.toast_delay_seconds = 60;
+    let mut state = ClientShellState::new(config);
+    state.set_snapshot(Box::new(snapshot()));
+    state.outer_focused = Some(false);
+    let completion = crate::protocol::endpoint::EndpointShellCommandCompleted {
+        boot_id: "boot-1".into(),
+        terminal_id: "term-1".into(),
+        pane_id: "pane_1".into(),
+        sequence: 1,
+        exit_code: 7,
+        duration_ms: 12_000,
+        output: Some("42\n结束".into()),
+    };
+    let now = std::time::Instant::now();
+    let (effects, _) =
+        state.receive_shell_command_completed(&ClientEndpointId::Local, 1, completion.clone(), now);
+    let [ClientShellNotificationEffect::System {
+        title,
+        subtitle,
+        body,
+        target: Some(target),
+    }] = effects.as_slice()
+    else {
+        panic!("command completion must not require agent Done or wait for agent toast delay");
+    };
+    assert!(title.contains("exit 7"));
+    assert_eq!(subtitle.as_deref(), Some("client-shell / tab_1 / pane_1"));
+    assert_eq!(body.as_deref(), Some("42\n结束"));
+    assert_eq!(target.pane_id, "pane_1");
+    assert!(state
+        .receive_shell_command_completed(&ClientEndpointId::Local, 1, completion.clone(), now)
+        .0
+        .is_empty());
+    let mut next = completion.clone();
+    next.sequence = 2;
+    next.boot_id = "old-boot".into();
+    assert!(state
+        .receive_shell_command_completed(&ClientEndpointId::Local, 1, next.clone(), now)
+        .0
+        .is_empty());
+    next.boot_id = "boot-1".into();
+    next.pane_id = "closed-pane".into();
+    assert!(state
+        .receive_shell_command_completed(&ClientEndpointId::Local, 1, next.clone(), now)
+        .0
+        .is_empty());
+    next.sequence = 3;
+    next.pane_id = "pane_1".into();
+    next.output = None;
+    let (effects, _) =
+        state.receive_shell_command_completed(&ClientEndpointId::Local, 1, next, now);
+    assert!(
+        matches!(effects.as_slice(), [ClientShellNotificationEffect::System { body: Some(body), .. }] if body == "No output")
+    );
+    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
+    let mut next = completion;
+    next.sequence = 4;
+    assert!(state
+        .receive_shell_command_completed(&ClientEndpointId::Local, 1, next, now)
+        .0
+        .is_empty());
+}
+
+#[test]
+fn shell_command_notification_rejects_other_connections_and_resets_only_on_new_boot() {
+    let mut config = ClientShellConfig::from_config(&Config::default());
+    config.toast_delivery = crate::config::ToastDelivery::System;
+    let mut state = ClientShellState::new(config);
+    let local = ClientEndpointId::Local;
+    state.set_endpoint_snapshot_for_generation(&local, 4, Box::new(snapshot()));
+    state.outer_focused = Some(false);
+    let now = std::time::Instant::now();
+    let mut completion = crate::protocol::endpoint::EndpointShellCommandCompleted {
+        boot_id: "boot-1".into(),
+        terminal_id: "term-1".into(),
+        pane_id: "pane_1".into(),
+        sequence: 10,
+        exit_code: 0,
+        duration_ms: 10_000,
+        output: Some("local only".into()),
+    };
+    assert!(state
+        .receive_shell_command_completed(&local, 3, completion.clone(), now)
+        .0
+        .is_empty());
+    assert!(!state.shell_command_sequences.contains_key(&local));
+    assert_eq!(
+        state
+            .receive_shell_command_completed(&local, 4, completion.clone(), now)
+            .0
+            .len(),
+        1
+    );
+
+    state.set_endpoint_status(&local, ClientEndpointStatus::Reconnecting);
+    state.set_endpoint_snapshot_for_generation(&local, 5, Box::new(snapshot()));
+    state.set_endpoint_status(&local, ClientEndpointStatus::Online);
+    assert!(state
+        .receive_shell_command_completed(&local, 5, completion.clone(), now)
+        .0
+        .is_empty());
+    completion.sequence = 11;
+    assert_eq!(
+        state
+            .receive_shell_command_completed(&local, 5, completion.clone(), now)
+            .0
+            .len(),
+        1
+    );
+
+    let profile = crate::client::endpoint::SavedSshEndpoint {
+        id: crate::client::endpoint::ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+        label: "Build".into(),
+        target: "dev@build.example".into(),
+        session: "agents".into(),
+        enabled: true,
+    };
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    state.set_endpoint_catalog(&[profile]);
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    state.set_endpoint_snapshot_for_generation(&remote, 5, Box::new(snapshot()));
+    assert!(state
+        .receive_shell_command_completed(&remote, 5, completion.clone(), now)
+        .0
+        .is_empty());
+    assert!(!state.shell_command_sequences.contains_key(&remote));
+
+    let mut rebooted = snapshot();
+    rebooted.boot_id = "boot-2".into();
+    state.set_endpoint_snapshot_for_generation(&local, 6, Box::new(rebooted));
+    assert!(state
+        .receive_shell_command_completed(&local, 6, completion.clone(), now)
+        .0
+        .is_empty());
+    completion.boot_id = "boot-2".into();
+    completion.sequence = 1;
+    assert_eq!(
+        state
+            .receive_shell_command_completed(&local, 6, completion, now)
+            .0
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn mouse_hits_use_stable_workspace_tab_and_pane_ids() {
     let config = ClientShellConfig::from_config(&Config::default());
     let mut state = ClientShellState::new(config);

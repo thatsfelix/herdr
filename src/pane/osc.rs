@@ -349,7 +349,7 @@ pub(super) fn parse_reported_cwd(value: &[u8]) -> Option<PathBuf> {
 /// Collects complete OSC bodies from a raw byte stream. Consumers receive only
 /// bodies, keeping the framing state machine independent from OSC commands.
 #[derive(Debug, Default)]
-struct OscStreamCollector {
+pub(super) struct OscStreamCollector {
     state: OscStreamState,
     body: Vec<u8>,
 }
@@ -371,6 +371,12 @@ impl OscStreamCollector {
     const MAX_BODY_BYTES: usize = 4096;
 
     fn observe(&mut self, bytes: &[u8], mut receive: impl FnMut(&[u8])) {
+        self.observe_ordered(bytes, |body, _| receive(body));
+    }
+
+    /// Reports each complete OSC body and its end offset in this chunk.
+    /// Consumers can retain intervening byte spans without per-byte allocation.
+    pub(super) fn observe_ordered(&mut self, bytes: &[u8], mut receive: impl FnMut(&[u8], usize)) {
         let mut cursor = 0;
         while cursor < bytes.len() {
             if matches!(
@@ -402,16 +408,16 @@ impl OscStreamCollector {
                     _ => self.state = OscStreamState::Ground,
                 },
                 OscStreamState::Body => match byte {
-                    0x07 => self.finish(&mut receive),
+                    0x07 => self.finish(&mut |body| receive(body, cursor)),
                     0x1b => self.state = OscStreamState::BodyEscape,
                     _ => self.push(byte),
                 },
                 OscStreamState::BodyEscape => match byte {
-                    b'\\' => self.finish(&mut receive),
+                    b'\\' => self.finish(&mut |body| receive(body, cursor)),
                     0x07 => {
                         self.push(0x1b);
                         if matches!(self.state, OscStreamState::Body) {
-                            self.finish(&mut receive);
+                            self.finish(&mut |body| receive(body, cursor));
                         } else {
                             self.state = OscStreamState::Ground;
                         }

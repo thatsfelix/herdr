@@ -1045,15 +1045,29 @@ pub(crate) fn shared_ssh_control_path(
     ))
 }
 
+/// Platforms without a subtitle field keep both parts in their message.
+pub(crate) fn desktop_notification_message(
+    subtitle: Option<&str>,
+    body: Option<&str>,
+) -> Option<String> {
+    match (subtitle, body) {
+        (Some(subtitle), Some(body)) => Some(format!("{subtitle}\n{body}")),
+        (Some(text), None) | (None, Some(text)) => Some(text.to_owned()),
+        (None, None) => None,
+    }
+}
+
 // Platforms without native click callbacks retain untargeted delivery.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) fn show_actionable_desktop_notification(
     title: &str,
+    subtitle: Option<&str>,
     body: Option<&str>,
     _key: String,
     _callback: std::sync::Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<bool> {
-    show_desktop_notification(title, body)
+    let message = desktop_notification_message(subtitle, body);
+    show_desktop_notification(title, message.as_deref())
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]

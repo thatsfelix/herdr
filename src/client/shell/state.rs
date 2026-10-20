@@ -721,6 +721,7 @@ pub(crate) enum ClientShellNotificationEffect {
     },
     System {
         title: String,
+        subtitle: Option<String>,
         body: Option<String>,
         target: Option<ClientSystemNotificationTarget>,
     },
@@ -942,6 +943,7 @@ pub(crate) struct ClientShellState {
     pub(super) pending_requests: HashMap<String, PendingEndpointRequest>,
     pub(super) pending_integration_installs: usize,
     pub(super) pending_notifications: Vec<ClientPendingNotification>,
+    pub(super) shell_command_sequences: HashMap<ClientEndpointId, (String, u64)>,
     pub(super) visible_notification: Option<ClientVisibleNotification>,
     pub(super) queued_notifications: VecDeque<ClientVisibleNotification>,
     pub(super) endpoint_notice_seen: HashSet<ClientEndpointNoticeKey>,
@@ -1110,6 +1112,7 @@ impl ClientShellState {
             pending_requests: HashMap::new(),
             pending_integration_installs: 0,
             pending_notifications: Vec::new(),
+            shell_command_sequences: HashMap::new(),
             visible_notification: None,
             queued_notifications: VecDeque::new(),
             endpoint_notice_seen: HashSet::new(),

@@ -352,10 +352,13 @@ fn run(requests: mpsc::Receiver<Request>, ready: mpsc::SyncSender<io::Result<usi
 
 pub(crate) fn show_actionable_desktop_notification(
     title: &str,
+    subtitle: Option<&str>,
     body: Option<&str>,
     key: String,
     callback: Callback,
 ) -> io::Result<bool> {
+    let message = crate::platform::desktop_notification_message(subtitle, body);
+    let body = message.as_deref();
     let service = {
         let mut service = lock(&SERVICE);
         if service.is_none() {
@@ -396,6 +399,7 @@ pub(crate) fn show_actionable_desktop_notification(
 pub(crate) fn show_desktop_notification(title: &str, body: Option<&str>) -> io::Result<bool> {
     show_actionable_desktop_notification(
         title,
+        None,
         body,
         "general".into(),
         Arc::new(foreground_desktop_notification_host),
