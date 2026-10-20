@@ -55,6 +55,29 @@ herdr integration uninstall grok
 
 Herdr saves integration configs atomically on Linux/macOS and for new files; existing Windows files keep their permissions through a backup-first, in-place update. If Windows reports a backup, close the agent and inspect the config before retrying: discard—not restore—an unfinished `.herdr-backup.pending` only after verifying the config, or restore completed `.herdr-backup` contents into the existing file if needed (if missing, establish its intended permissions first), then verify the config and remove the backup.
 
+## Local zsh command notifications (experimental)
+
+This source-tree opt-in requires a server and client built with command notification support. In an interactive local Herdr zsh, load the asset explicitly (replace the checkout path):
+
+```zsh
+source /path/to/herdr/src/integration/assets/shell-command.zsh
+```
+
+No shell startup file is changed. Repeated sourcing is idempotent. Set `HERDR_COMMAND_NOTIFY_THRESHOLD_MS` before a command to change the default 10,000 ms threshold (integer 0–86,400,000). Run `herdr_command_notify_disable` to remove these hooks from the current shell. This asset is not an `integration install` agent integration.
+
+To enable it in every Herdr pane, copy the asset to a stable path and source it from `~/.zshrc` after your other hooks. The guard keeps it inactive outside Herdr:
+
+```zsh
+export HERDR_COMMAND_NOTIFY_THRESHOLD_MS=10000   # optional, default 10000
+[[ "${HERDR_ENV:-}" == "1" && -f "$HOME/.config/herdr/shell-command.zsh" ]] && builtin source "$HOME/.config/herdr/shell-command.zsh"
+```
+
+Panes opened before the change need `exec zsh`. Commands shorter than the threshold never notify.
+
+Completed foreground commands at or above the threshold use the existing notification delivery and focus policy. Notifications include exit status and a bounded output tail; commands with no output show `No output`, never old screen content. Standard output and standard error are merged by the PTY. This captures a command's time window, not process-isolated output: concurrent background output may be included, and background job completion is unsupported.
+
+Existing named `precmd` functions prevent activation rather than being replaced. Command lines containing any `&` are conservatively skipped, including `&&` and quoted ampersands. Input during execution, alternate-screen use, or detected agents cancels the command notification. Other shells and remote endpoints are not supported yet. Output may contain secrets visible in system notifications; enable only in suitable panes. The OSC markers are not an authentication boundary.
+
 ## How Herdr uses integrations
 
 Every integration tells Herdr which session the agent is in, so Herdr can resume it after a server restart. Turn this off with `[session] resume_agents_on_restore = false`.
@@ -126,6 +149,8 @@ herdr integration install codex
 The Codex hook reports session identity through the same local socket API used by other integrations. Codex state comes from Herdr's screen manifest detection.
 
 Herdr uses `~/.codex` by default, or `CODEX_HOME` when set. The Codex config directory must already exist. Install writes `herdr-agent-state.sh`, updates `hooks.json`, and ensures `[features] hooks = true` in `config.toml`. It also removes the deprecated top-level `codex_hooks` flag when present. Uninstall removes Herdr entries from `hooks.json` and deletes the hook script, but leaves `config.toml` unchanged.
+
+Codex 0.163's shared background server inherits its startup environment rather than isolating `HERDR_PANE_ID` for each client. Session identity may consequently be missing or reported to another pane, preventing reliable last-reply notifications. For an explicitly isolated local session, use `codex --no-daemon` or `codex resume <session-id> --no-daemon` with the SessionStart hook enabled. Herdr does not change global launch defaults or stop the shared server. Isolation also changes the shared server's ability to keep tasks running after the TUI exits. Existing shared-server sessions are not covered by this approach; Herdr does not guess their identity from a working directory or modification time.
 
 ## GitHub Copilot CLI
 

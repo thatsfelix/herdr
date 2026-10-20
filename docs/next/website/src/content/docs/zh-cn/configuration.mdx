@@ -494,6 +494,26 @@ position = "bottom-right"
 
 Windows 的 `system` 通知会保留在通知中心。点击通知会在运行中的 Herdr 客户端选择来源窗格,并在 Windows 能识别对应窗口时将终端置于前台。点击不能重新打开已关闭的客户端,也不能选择已重启服务器中的窗格。Windows Terminal 可以将所属窗口置于前台,但无法可靠地切换到另一个外层终端标签页。
 
+### 系统通知内容与点击定位
+
+智能体的 `system` 通知以智能体和事件作为标题（`codex finished`），位置作为副标题，智能体的最后一条回复作为正文。位置格式为 `[机器 · ]工作区 / Tab / Pane`：只有连接了多台机器时才显示机器名，未命名的 tab 或 pane 显示其编号（`t1`、`p1`）。位置由客户端根据自己看到的会话状态拼装，不依赖服务端的投递配置。没有回复正文的通知会用标题作为正文，因为 `terminal-notifier` 不接受空消息。
+
+点击通知会在运行中的 Herdr 客户端里选中它所属的 pane，包括其他机器上的 pane。点击携带一次性令牌，并绑定机器、服务端 boot ID 和 pane，因此服务端重启或 pane 已关闭时不会误选其他位置。
+
+最后一条回复来自智能体自己的会话记录，所以 Herdr 必须知道该会话。Claude 以及 `codex --no-daemon` 会话通过 hook 上报，详见[集成](/zh-cn/docs/integrations/)。回复由服务端生成，因此远程机器需要包含此支持的构建；没有它的服务端仍会通知，但只有位置信息。
+
+#### 可选的自定义通知应用（macOS）
+
+如果存在 `~/Applications/Herdr notifier.app/Contents/MacOS/terminal-notifier`，Herdr 会优先使用它，否则使用 `PATH` 中的 `terminal-notifier`。该应用是用户自己制作的 `terminal-notifier` 3.1.0 副本，不随 Herdr 发布，也不是必需的，唯一目的是让通知中心里显示独立的名称和图标。制作方法：
+
+1. 将 `terminal-notifier.app` 复制为 `~/Applications/Herdr notifier.app`。
+2. 在 `Contents/Info.plist` 中，把 `CFBundleName` 和 `CFBundleDisplayName` 设为 `Herdr notifier`，把 `CFBundleIdentifier` 设为你自己的标识符；`CFBundleExecutable` 保持 `terminal-notifier`，`LSUIElement` 保持 `true`。
+3. 把你的 `.icns` 文件放进 `Contents/Resources/`，并将 `CFBundleIconFile` 设为不带扩展名的文件名。macOS 只从应用包读取通知图标。
+4. 进行临时签名：`codesign --force --deep --sign - "$HOME/Applications/Herdr notifier.app"`。
+5. 运行一次，并在系统设置中允许它发送通知。
+
+通知器出错退出时，Herdr 会在 `herdr-client.log` 中以 `macOS notifier failed to deliver` 记录其退出状态和输出。
+
 ## 声音
 
 声音通知通过本地 Herdr 客户端播放。自定义声音必须是 mp3 文件；相对路径从配置文件所在目录解析。

@@ -498,6 +498,26 @@ On macOS, `system` tries `terminal-notifier` first and falls back to `/usr/bin/o
 
 On Windows, `system` notifications remain in Notification Center. Clicking one selects its originating pane in the running Herdr client and brings its terminal window forward when Windows exposes that window. A click cannot reopen a closed client or select a pane from a restarted server. Windows Terminal can bring the owning window forward, but cannot reliably select a different outer terminal tab.
 
+### System notification content and click-through
+
+A `system` notification for an agent shows the agent and event as the title (`codex finished`), the location as the subtitle, and the agent's last reply as the body. The location is `[Machine · ]Workspace / Tab / Pane`: the machine appears only when more than one machine is connected, and an unnamed tab or pane shows its number (`t1`, `p1`). The client composes the location from its own view of the session, so it does not depend on the server's delivery setting. A notification without a reply body falls back to its title, because `terminal-notifier` rejects an empty message.
+
+Clicking a notification selects its originating pane in the running Herdr client, including a pane on another machine. The click carries a one-time token bound to the machine, the server's boot ID, and the pane, so a restarted server or a closed pane is never selected by mistake.
+
+The last reply comes from the agent's own session transcript and therefore requires Herdr to know the session. Claude and `codex --no-daemon` sessions report it through their hooks; see [Integrations](/docs/integrations/). The reply is produced by the server, so a remote machine needs a build with this support. Servers without it still notify, with the location only.
+
+#### Optional custom notifier app (macOS)
+
+Herdr prefers `~/Applications/Herdr notifier.app/Contents/MacOS/terminal-notifier` when it exists and otherwise uses `terminal-notifier` from `PATH`. The app is a user-made copy of the `terminal-notifier` 3.1.0 bundle; it is not shipped with Herdr and is not required. Its only purpose is a distinct name and icon in Notification Center. To make one:
+
+1. Copy the `terminal-notifier.app` bundle to `~/Applications/Herdr notifier.app`.
+2. In `Contents/Info.plist`, set `CFBundleName` and `CFBundleDisplayName` to `Herdr notifier`, and `CFBundleIdentifier` to an identifier of your own. Keep `CFBundleExecutable` as `terminal-notifier` and `LSUIElement` as `true`.
+3. Add your `.icns` file to `Contents/Resources/` and set `CFBundleIconFile` to its name without the extension. macOS takes a notification's icon from the app bundle only.
+4. Sign it ad hoc: `codesign --force --deep --sign - "$HOME/Applications/Herdr notifier.app"`.
+5. Run it once and allow notifications for it in System Settings.
+
+If the notifier exits with an error, Herdr logs its exit status and output as `macOS notifier failed to deliver` in `herdr-client.log`.
+
 ## Sound
 
 Sound notifications play through the local Herdr client. Custom sounds must be mp3 files; Herdr resolves relative paths from the config file's directory.

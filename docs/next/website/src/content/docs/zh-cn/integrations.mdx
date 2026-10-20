@@ -57,6 +57,29 @@ herdr integration uninstall grok
 
 Herdr 对 Linux/macOS 上的集成配置和所有平台的新文件使用原子保存；Windows 上的现有文件先备份再原地更新，以保留权限。如果 Windows 提示存在备份，请在重试前关闭智能体并检查配置：未完成的 `.herdr-backup.pending` 只能在确认配置正确后删除，不能用于恢复；完整 `.herdr-backup` 的内容可在需要时写回现有文件（若文件已丢失，先设置其预期权限），确认配置正确后再删除备份。
 
+## 本地 zsh 命令通知（实验性）
+
+此源码级可选功能要求服务端和客户端都包含命令通知支持。在本地 Herdr 的交互式 zsh 中显式加载脚本（替换源码目录）：
+
+```zsh
+source /path/to/herdr/src/integration/assets/shell-command.zsh
+```
+
+不会修改 Shell 启动文件，重复加载不会重复注册。执行命令前设置 `HERDR_COMMAND_NOTIFY_THRESHOLD_MS` 可修改默认 10,000 毫秒阈值，取值为 0–86,400,000 的整数。运行 `herdr_command_notify_disable` 可移除当前 Shell 的这些钩子。此脚本不属于 `integration install` 的智能体集成。
+
+如需在每个 Herdr pane 中启用，请把脚本复制到固定路径，并在 `~/.zshrc` 中其他 hook 之后加载。其中的判断保证它在 Herdr 之外不会生效：
+
+```zsh
+export HERDR_COMMAND_NOTIFY_THRESHOLD_MS=10000   # 可选，默认 10000
+[[ "${HERDR_ENV:-}" == "1" && -f "$HOME/.config/herdr/shell-command.zsh" ]] && builtin source "$HOME/.config/herdr/shell-command.zsh"
+```
+
+修改前已打开的 pane 需要执行 `exec zsh`。耗时低于阈值的命令不会通知。
+
+耗时达到阈值的前台命令完成后，沿用现有通知投递和焦点策略，显示退出码及有界的输出尾段。无输出时显示 `No output`，不会读取旧屏幕内容。PTY 已合并标准输出和标准错误；采集范围是命令执行的时间窗口，而非按进程隔离的输出，因此可能混入并发后台输出，也不支持后台任务完成通知。
+
+已有命名 `precmd` 函数时拒绝启用，不会覆盖该函数。命令行包含任意 `&` 时保守跳过，包括 `&&` 和引号内的 `&`。执行期间有用户输入、使用备用屏幕或检测到智能体时，会取消命令通知。暂不支持其他 Shell 和远程端点。输出可能包含会显示在系统通知中的敏感信息，请仅在适合的窗格中启用；OSC 标记不构成认证边界。
+
 ## Herdr 如何使用集成
 
 每个集成都会告诉 Herdr 智能体当前所在的会话,这样 Herdr 就能在服务器重启后恢复它。用 `[session] resume_agents_on_restore = false` 可以关闭。
@@ -128,6 +151,8 @@ herdr integration install codex
 Codex 钩子通过与其他集成相同的本地 socket API 上报会话身份。Codex 的状态来自 Herdr 的屏幕清单检测。
 
 Herdr 默认使用 `~/.codex`,设置了 `CODEX_HOME` 时使用后者。Codex 配置目录必须已经存在。安装会写入 `herdr-agent-state.sh`、更新 `hooks.json`,并确保 `config.toml` 中有 `[features] hooks = true`。如果存在已弃用的顶层 `codex_hooks` 标志,它也会一并移除。卸载会从 `hooks.json` 中移除 Herdr 条目并删除钩子脚本,但不改动 `config.toml`。
+
+Codex 0.163 的共享后台服务使用服务启动时继承的环境，不保证每个客户端独立的 `HERDR_PANE_ID`。这可能使会话身份缺失或上报到其他窗格，从而无法可靠显示最后回复。需要隔离本地会话时，可明确使用 `codex --no-daemon` 或 `codex resume <会话ID> --no-daemon`，并保持 SessionStart 钩子启用。Herdr 不会自动更改全局启动方式或停止共享服务；隔离模式也不保留共享服务在 TUI 退出后继续执行任务的行为。现有共享服务会话不在此方案保证范围内，Herdr 不会按工作目录或最近修改时间猜测其会话。
 
 ## GitHub Copilot CLI
 

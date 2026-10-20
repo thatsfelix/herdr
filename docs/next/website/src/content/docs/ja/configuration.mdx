@@ -494,6 +494,26 @@ macOS では、`system` は最初に `terminal-notifier` を試し、利用で�
 
 Windows の `system` 通知は通知センターに残ります。クリックすると、実行中の Herdr クライアントで元のペインを選択し、Windows が対象ウィンドウを取得できればターミナルを前面に出します。閉じたクライアントを開き直したり、再起動したサーバーのペインを選択したりはできません。Windows Terminal ではウィンドウを前面に出せますが、外側の別タブを確実に選択することはできません。
 
+### システム通知の内容とクリック時の移動
+
+エージェントの `system` 通知は、エージェントとイベントをタイトル（`codex finished`）、場所をサブタイトル、エージェントの最後の返信を本文として表示します。場所は `[マシン · ]ワークスペース / Tab / Pane` で、マシン名は複数のマシンが接続されている場合のみ表示され、名前のない tab や pane は番号（`t1`、`p1`）で表示されます。場所はクライアントが自身のセッション情報から組み立てるため、サーバーの配信設定に依存しません。返信本文がない通知は、`terminal-notifier` が空のメッセージを受け付けないため、タイトルを本文として使います。
+
+通知をクリックすると、実行中の Herdr クライアントで元の pane が選択されます。別のマシン上の pane も対象です。クリックにはマシン、サーバーの boot ID、pane に結び付いた使い捨てトークンが含まれるため、サーバーの再起動や閉じた pane で別の場所が選ばれることはありません。
+
+最後の返信はエージェント自身のセッション記録から取得するため、Herdr がそのセッションを把握している必要があります。Claude と `codex --no-daemon` のセッションは hook で報告します。詳しくは[連携](/ja/docs/integrations/)を参照してください。返信はサーバーが生成するため、リモートマシンにはこの対応を含むビルドが必要です。対応していないサーバーでも通知は届きますが、場所だけが表示されます。
+
+#### 任意のカスタム通知アプリ（macOS）
+
+`~/Applications/Herdr notifier.app/Contents/MacOS/terminal-notifier` が存在する場合は Herdr がそれを優先し、なければ `PATH` 上の `terminal-notifier` を使います。このアプリはユーザーが作成した `terminal-notifier` 3.1.0 のコピーで、Herdr には同梱されず、必須でもありません。通知センターで独自の名前とアイコンを表示することだけが目的です。作成手順:
+
+1. `terminal-notifier.app` を `~/Applications/Herdr notifier.app` にコピーします。
+2. `Contents/Info.plist` で `CFBundleName` と `CFBundleDisplayName` を `Herdr notifier` に、`CFBundleIdentifier` を独自の識別子に設定します。`CFBundleExecutable` は `terminal-notifier`、`LSUIElement` は `true` のままにします。
+3. `.icns` ファイルを `Contents/Resources/` に置き、`CFBundleIconFile` に拡張子なしのファイル名を設定します。macOS は通知のアイコンをアプリバンドルからのみ取得します。
+4. アドホック署名をします: `codesign --force --deep --sign - "$HOME/Applications/Herdr notifier.app"`。
+5. 一度起動し、システム設定で通知を許可します。
+
+通知アプリがエラーで終了した場合、Herdr は終了ステータスと出力を `herdr-client.log` に `macOS notifier failed to deliver` として記録します。
+
 ## サウンド
 
 サウンド通知はローカルの Herdr クライアントで再生されます。カスタムサウンドは mp3 ファイルでなければなりません。相対パスは設定ファイルのディレクトリから解決されます。
