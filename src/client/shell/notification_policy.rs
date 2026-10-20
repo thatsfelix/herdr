@@ -211,10 +211,12 @@ impl ClientShellState {
             match self.config.toast_delivery {
                 crate::config::ToastDelivery::Off => {}
                 crate::config::ToastDelivery::Herdr if !target_active => {
+                    let mut event = pending.event;
+                    event.body = event.body.map(|body| split_reply(&body).0.to_owned());
                     self.queue_visible_notification(
                         ClientVisibleNotification {
                             endpoint_id: pending.endpoint_id,
-                            event: pending.event,
+                            event,
                             deadline: now,
                         },
                         now,
@@ -225,7 +227,10 @@ impl ClientShellState {
                 crate::config::ToastDelivery::Terminal if !suppress_external => {
                     effects.push(ClientShellNotificationEffect::Terminal {
                         title: pending.event.title,
-                        body: pending.event.body,
+                        body: pending
+                            .event
+                            .body
+                            .map(|body| split_reply(&body).0.to_owned()),
                     });
                 }
                 crate::config::ToastDelivery::System if !suppress_external => {
@@ -238,15 +243,7 @@ impl ClientShellState {
                             }
                         })
                     });
-                    // With more than one machine, the machine leads the location so a
-                    // remote notification is never mistaken for a local one.
-                    let body = pending.event.body.map(|body| {
-                        if self.endpoints.len() > 1 {
-                            format!("{} · {body}", self.endpoint_label(&pending.endpoint_id))
-                        } else {
-                            body
-                        }
-                    });
+                    let body = self.system_notification_body(&pending.endpoint_id, &pending.event);
                     effects.push(ClientShellNotificationEffect::System {
                         title: pending.event.title,
                         body,
@@ -372,5 +369,105 @@ impl ClientShellState {
                 NotificationValidation::Stale
             }
         }
+    }
+}
+
+/// Servers send "context" or "context\nreply"; the reply is the agent's own words.
+fn split_reply(body: &str) -> (&str, Option<&str>) {
+    match body.split_once('\n') {
+        Some((context, reply)) if !reply.trim().is_empty() => (context, Some(reply)),
+        Some((context, _)) => (context, None),
+        None => (body, None),
+    }
+}
+
+impl ClientShellState {
+    /// "[Machine · ]Workspace · Tab · Pane" from this client's own projection, with
+    /// ids standing in for unnamed parts. Only agent-driven notifications have one.
+    fn notification_location(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        event: &SemanticNotification,
+    ) -> Option<String> {
+        let pane_id = event.pane_id.as_deref()?;
+        let snapshot = self
+            .endpoints
+            .iter()
+            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)?
+            .snapshot
+            .as_deref()?;
+        let named = |label: &str| (!label.trim().is_empty()).then(|| label.to_owned());
+        let workspace_id = event.workspace_id.as_deref().or_else(|| {
+            snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .map(|pane| pane.workspace_id.as_str())
+        })?;
+        let workspace = snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.workspace_id == workspace_id)
+            .and_then(|workspace| named(&workspace.label))
+            .unwrap_or_else(|| workspace_id.to_owned());
+        let tab_id = event.tab_id.as_deref().or_else(|| {
+            snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .map(|pane| pane.tab_id.as_str())
+        })?;
+        let tab = snapshot
+            .tabs
+            .iter()
+            .find(|tab| tab.tab_id == tab_id && tab.custom_label)
+            .and_then(|tab| named(&tab.label))
+            .unwrap_or_else(|| tab_id.to_owned());
+        let pane = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .and_then(|pane| pane.label.as_deref())
+            .and_then(named)
+            .unwrap_or_else(|| pane_id.to_owned());
+        let mut parts = Vec::with_capacity(4);
+        // With more than one machine the machine leads, so a remote notification is
+        // never mistaken for a local one.
+        if self.endpoints.len() > 1 {
+            parts.push(self.endpoint_label(endpoint_id).to_owned());
+        }
+        parts.extend([workspace, tab, pane]);
+        Some(parts.join(" · "))
+    }
+
+    /// "location\nreply" when the agent's reply is known, otherwise the location alone.
+    fn system_notification_body(
+        &self,
+        endpoint_id: &ClientEndpointId,
+        event: &SemanticNotification,
+    ) -> Option<String> {
+        let (context, reply) = event.body.as_deref().map_or((None, None), |body| {
+            let (context, reply) = split_reply(body);
+            (Some(context), reply)
+        });
+        let location = self
+            .notification_location(endpoint_id, event)
+            .or_else(|| context.map(str::to_owned));
+        match (location, reply) {
+            (Some(location), Some(reply)) => Some(format!("{location}\n{reply}")),
+            (location, _) => location,
+        }
+    }
+}
+
+#[cfg(test)]
+mod reply_split_tests {
+    use super::split_reply;
+
+    #[test]
+    fn splits_context_from_reply() {
+        assert_eq!(split_reply("ws · 1"), ("ws · 1", None));
+        assert_eq!(split_reply("ws · 1\n42"), ("ws · 1", Some("42")));
+        assert_eq!(split_reply("ws · 1\n  "), ("ws · 1", None));
     }
 }

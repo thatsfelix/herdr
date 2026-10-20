@@ -19,36 +19,6 @@ impl HeadlessServer {
             .unwrap_or(crate::detect::AgentState::Unknown)
     }
 
-    /// "Workspace · Tab · Pane", falling back to ids for unnamed parts.
-    fn notification_location(
-        &self,
-        ws_idx: usize,
-        tab_idx: usize,
-        pane_id: crate::layout::PaneId,
-        workspace_label: &str,
-        public_tab_id: &str,
-        public_pane_id: &str,
-    ) -> String {
-        let workspace = self.app.state.workspaces.get(ws_idx);
-        let workspace_name = if workspace_label.trim().is_empty() {
-            workspace.map(|ws| ws.id.clone()).unwrap_or_default()
-        } else {
-            workspace_label.to_owned()
-        };
-        let tab_name = workspace
-            .and_then(|ws| ws.tabs.get(tab_idx))
-            .and_then(|tab| tab.custom_name.clone())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or_else(|| public_tab_id.to_owned());
-        let pane_name = workspace
-            .and_then(|ws| ws.pane_state(pane_id))
-            .and_then(|pane| self.app.state.terminals.get(&pane.attached_terminal_id))
-            .and_then(|terminal| terminal.manual_label.clone())
-            .filter(|label| !label.trim().is_empty())
-            .unwrap_or_else(|| public_pane_id.to_owned());
-        format!("{workspace_name} · {tab_name} · {pane_name}")
-    }
-
     /// The agent's latest reply, read from its own session transcript.
     fn notification_reply(&self, pane_id: crate::layout::PaneId) -> Option<String> {
         let terminal = self.app.state.workspaces.iter().find_map(|ws| {
@@ -135,23 +105,11 @@ impl HeadlessServer {
             workspace.display_name_from(&self.app.state.terminals, &self.app.terminal_runtimes);
         let context =
             crate::app::actions::notification_context(workspace, &workspace_label, ws_idx, pane_id);
-        let body = if self.app.state.toast_config.delivery == crate::config::ToastDelivery::System {
-            let location = self.notification_location(
-                ws_idx,
-                tab_idx,
-                pane_id,
-                &workspace_label,
-                &tab_id,
-                &public_pane_id,
-            );
-            // System banners show the agent's own words under a location subtitle:
-            // "location\nreply". The client splits on the first newline.
-            match self.notification_reply(pane_id) {
-                Some(reply) => format!("{location}\n{reply}"),
-                None => location,
-            }
-        } else {
-            context
+        // The agent's own reply rides after the first newline. Presentation is up to
+        // each client, so this must not depend on this server's delivery config.
+        let body = match self.notification_reply(pane_id) {
+            Some(reply) => format!("{context}\n{reply}"),
+            None => context,
         };
         let agent = known_agent
             .map(crate::detect::agent_label)
